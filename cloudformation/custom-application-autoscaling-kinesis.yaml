@@ -1,0 +1,247 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+
+
+Parameters:
+  S3BucketLambda:
+    Type: String
+    Description: The S3 bucket location where the lambda deployment package is
+    Default: kinesisblog
+  #added
+  CloudWatchAlarmNameOut:
+    Type: String
+    Description: Alarm name for CloudWatch Alarm scale out
+    Default: IncomingRecords-alarm-out
+  CloudWatchAlarmNameIn:
+    Type: String
+    Description: Alarm name for CloudWatch Alarm scale in
+    Default: IncomingRecords-alarm-in
+  ShardCount:
+    Type: String
+    Description: Number of initial shards
+    Default: 2
+
+
+Resources:
+
+  CustomApplicationAutoScalingServiceRole:
+    DependsOn: MyApi
+    Type: 'AWS::IAM::Role'
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Version: '2012-10-17'
+        Statement: 
+          - 
+            Effect: 'Allow'
+            Principal: 
+              Service: 
+                - 'custom-resource.application-autoscaling.amazonaws.com'
+            Action: 
+              - 'sts:AssumeRole'
+      Path: "/"
+      Policies: 
+        - 
+          PolicyName: 'root'
+          PolicyDocument: 
+            Version: "2012-10-17"
+            Statement: 
+              - 
+                Effect: 'Allow'
+                Action:
+                  - 'execute-api:Invoke*'
+                  - 'cloudwatch:PutMetricAlarm'
+                  - 'cloudwatch:DescribeAlarms'
+                  - 'cloudwatch:DeleteAlarms'
+                Resource: '*'
+
+  LambdaScaler:
+    #DeletionPolicy: Retain
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: index.lambda_handler
+      Runtime: python3.6
+      CodeUri: 
+        Bucket: !Ref S3BucketLambda
+        Key: index.zip        
+      Policies:
+        - AmazonKinesisFullAccess 
+        - AmazonAPIGatewayAdministrator
+        - AWSCloudFormationReadOnlyAccess
+        - AmazonSSMFullAccess
+        - AWSLambdaFullAccess
+      Environment:
+        Variables:
+          ParameterStore: !Ref KinesisDesiredCapacityParameter
+          CloudWatchAlarmNameIn: !Ref CloudWatchAlarmNameIn
+          CloudWatchAlarmNameOut: !Ref CloudWatchAlarmNameOut
+      Events:
+        KinesisAPI:
+          Type: Api
+          Properties:
+            Path: /scalableTargetDimensions/{scalableTargetDimensionId}
+            Method: GET
+            RestApiId: !Ref MyApi
+        KinesisAPIPatch:
+          Type: Api
+          Properties:              
+            Path: /scalableTargetDimensions/{scalableTargetDimensionId}
+            Method: PATCH                      
+            RestApiId: !Ref MyApi
+
+  MyApi:
+    #DeletionPolicy: Retain
+    Type: AWS::Serverless::Api
+    Properties:
+        StageName: prod
+        DefinitionBody:
+          swagger: 2.0
+          info:
+            title:
+              Ref: AWS::StackName
+          securityDefinitions:
+            sigv4:
+              type: apiKey
+              name: Authorization
+              in: header
+              x-amazon-apigateway-authtype: awsSigv4
+          paths:
+            "/scalableTargetDimensions/{scalableTargetDimensionId}":
+              get:
+                security:
+                  - sigv4: []                
+                x-amazon-apigateway-any-method:
+                  produces:
+                    - application/json
+                  consumes:
+                    - application/json
+                x-amazon-apigateway-integration:
+                  httpMethod: POST
+                  type: aws_proxy
+                  uri:
+                    Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaScaler.Arn}/invocations
+                responses: {} 
+
+              patch:              
+                security:
+                  - sigv4: []                                
+                x-amazon-apigateway-any-method:
+                  security:
+                    - sigv4: []
+                  produces:
+                    - application/json
+                  consumes:
+                    - application/json
+                x-amazon-apigateway-integration:
+                  httpMethod: POST
+                  type: aws_proxy
+                  uri:
+                    Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaScaler.Arn}/invocations
+                responses: {} 
+
+  MyKinesisStream:
+    Type: AWS::Kinesis::Stream
+    Properties: 
+      ShardCount: !Ref ShardCount
+
+  KinesisDesiredCapacityParameter:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Type: "String"
+      Value: !Ref ShardCount
+      Description: "Store DesiredCapacity in Parameter Store"
+      AllowedPattern: "[0-9]"
+
+
+  KinesisAutoScaling:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    DependsOn: LambdaScaler
+    Properties:
+      MaxCapacity: 8
+      MinCapacity: 1
+      ResourceId: !Sub https://${MyApi}.execute-api.${AWS::Region}.amazonaws.com/prod/scalableTargetDimensions/${MyKinesisStream}
+      RoleARN: !Sub ${CustomApplicationAutoScalingServiceRole.Arn}
+      ScalableDimension: 'custom-resource:ResourceType:Property'
+      ServiceNamespace: custom-resource
+
+  AutoScalingPolicyOut:
+    Type : "AWS::ApplicationAutoScaling::ScalingPolicy"
+    DependsOn: KinesisAutoScaling
+    Properties: 
+      PolicyName: KinesisScaleOut
+      PolicyType: StepScaling
+      ResourceId: !Sub https://${MyApi}.execute-api.${AWS::Region}.amazonaws.com/prod/scalableTargetDimensions/${MyKinesisStream}      
+      ScalableDimension: "custom-resource:ResourceType:Property"
+      ServiceNamespace: custom-resource
+      StepScalingPolicyConfiguration: 
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 600
+        MetricAggregationType: Average
+        # ADDED
+        StepAdjustments:
+         - MetricIntervalLowerBound: 0
+           ScalingAdjustment: 1   
+
+  AutoScalingPolicyIn:
+    Type : "AWS::ApplicationAutoScaling::ScalingPolicy"
+    DependsOn: KinesisAutoScaling
+    Properties: 
+      PolicyName: KinesisScaleIn
+      PolicyType: StepScaling
+      ResourceId: !Sub https://${MyApi}.execute-api.${AWS::Region}.amazonaws.com/prod/scalableTargetDimensions/${MyKinesisStream}      
+      ScalableDimension: "custom-resource:ResourceType:Property"
+      ServiceNamespace: custom-resource
+      StepScalingPolicyConfiguration: 
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 600
+        MetricAggregationType: Average
+        StepAdjustments:
+         - MetricIntervalUpperBound: 0
+           ScalingAdjustment: -1
+
+#added
+  CWAlarmOut:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: MyKinesisStream
+    Properties:
+      AlarmName: !Ref CloudWatchAlarmNameOut
+      AlarmDescription: 'incomingRecord exceeds threshold'
+      MetricName: 'IncomingRecords'
+      Namespace: 'AWS/Kinesis'
+      Dimensions:
+        -
+          Name: StreamName
+          Value: !Ref MyKinesisStream
+      Statistic: 'Sum'
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1000
+      ComparisonOperator: 'GreaterThanThreshold'
+      AlarmActions:
+        - !Ref AutoScalingPolicyOut
+
+  CWAlarmIn:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: MyKinesisStream
+    Properties:
+      AlarmName: !Ref CloudWatchAlarmNameIn
+      AlarmDescription: 'incomingRecord below threshold'
+      MetricName: 'IncomingRecords'
+      Namespace: 'AWS/Kinesis'
+      Dimensions:
+        -
+          Name: StreamName
+          Value: !Ref MyKinesisStream
+      Statistic: 'Sum'
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 700
+      ComparisonOperator: 'LessThanThreshold'
+      AlarmActions:
+        - !Ref AutoScalingPolicyIn
+
+
+Outputs:
+  URL:
+    Description: the URL
+    Value: !Sub https://${MyApi}.execute-api.${AWS::Region}.amazonaws.com/prod/scalableTargetDimensions/${MyKinesisStream}
