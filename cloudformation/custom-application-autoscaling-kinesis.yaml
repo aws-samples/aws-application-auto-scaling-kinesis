@@ -21,6 +21,11 @@ Parameters:
     Type: String
     Description: Number of initial shards
     Default: 2
+  LambdaFunctionName:
+    Type: String
+    Description: Name for the lambda function that will be created
+    Default: Kinesis-Autoscale-Lambda-Scaler
+
 
 
 Resources:
@@ -42,7 +47,30 @@ Resources:
       Path: "/"
       Policies: 
         - 
-          PolicyName: 'root'
+          PolicyName: 'DescribeAlarm'
+          PolicyDocument: 
+            Version: "2012-10-17"
+            Statement: 
+              - 
+                Effect: 'Allow'
+                Action:
+                  - 'cloudwatch:DescribeAlarms'
+                Resource: '*'
+        - 
+          PolicyName: 'CWAlarms'
+          PolicyDocument: 
+            Version: "2012-10-17"
+            Statement: 
+              - 
+                Effect: 'Allow'
+                Action:
+                  - 'cloudwatch:PutMetricAlarm'
+                  - 'cloudwatch:DeleteAlarms'
+                Resource: 
+                  - !Join ['', ['arn:aws:cloudwatch:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':alarm:', !Ref 'CloudWatchAlarmNameIn']]
+                  - !Join ['', ['arn:aws:cloudwatch:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':alarm:', !Ref 'CloudWatchAlarmNameOut']]
+        - 
+          PolicyName: 'API-Invoke'
           PolicyDocument: 
             Version: "2012-10-17"
             Statement: 
@@ -50,10 +78,8 @@ Resources:
                 Effect: 'Allow'
                 Action:
                   - 'execute-api:Invoke*'
-                  - 'cloudwatch:PutMetricAlarm'
-                  - 'cloudwatch:DescribeAlarms'
-                  - 'cloudwatch:DeleteAlarms'
-                Resource: '*'
+                Resource:
+                - !Join ['', ['arn:aws:execute-api:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':', !Ref MyApi, '/*/*/scalableTargetDimensions/*']]
 
   LambdaScaler:
     #DeletionPolicy: Retain
@@ -63,13 +89,42 @@ Resources:
       Runtime: python3.6
       CodeUri: 
         Bucket: !Ref S3BucketLambda
-        Key: index.zip        
+        Key: index.zip   
+      FunctionName: !Ref LambdaFunctionName     
       Policies:
-        - AmazonKinesisFullAccess 
-        - AmazonAPIGatewayAdministrator
-        - AWSCloudFormationReadOnlyAccess
-        - AmazonSSMFullAccess
-        - AWSLambdaFullAccess
+        - Statement:
+            - Sid: AmazonKinesisResources
+              Effect: Allow
+              Action:
+                - kinesis:Describe*
+                - kinesis:UpdateShardCount
+              Resource: !GetAtt MyKinesisStream.Arn
+            - Sid: CFNDescribe
+              Effect: Allow
+              Action:
+                - cloudformation:DescribeStackResources
+              Resource: "*"
+            - Sid: SSMResources
+              Effect: Allow
+              Action:
+                - ssm:GetParameter*
+                - ssm:PutParameter
+              Resource: !Join ['', ['arn:aws:ssm:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':parameter/', !Ref KinesisDesiredCapacityParameter]]
+            - Sid: LambdaResources
+              Effect: Allow
+              Action: 
+                - lambda:updateFunctionConfiguration
+                - lambda:ListTags
+              Resource: !Join ['', ['arn:aws:lambda:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':function:', !Ref LambdaFunctionName ]]
+            - Sid: CloudWatch
+              Effect: Allow
+              Action:
+                -   cloudwatch:PutMetricAlarm
+                -   cloudwatch:DeleteAlarms
+              Resource: 
+                - !Join ['', ['arn:aws:cloudwatch:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':alarm:', !Ref 'CloudWatchAlarmNameIn']]
+                - !Join ['', ['arn:aws:cloudwatch:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':alarm:', !Ref 'CloudWatchAlarmNameOut']]
+
       Environment:
         Variables:
           ParameterStore: !Ref KinesisDesiredCapacityParameter
