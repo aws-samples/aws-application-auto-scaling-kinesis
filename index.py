@@ -225,7 +225,7 @@ def lambda_handler(event, context):
 				
 				global AUTOSCALINGPOLICYOUT_ARN
 				global AUTOSCALINGPOLICYIN_ARN
-				if 'AutoScalingPolicyOut' and 'AutoScalingPolicyIn' not in os.environ:
+				if 'AutoScalingPolicyOut' not in os.environ or 'AutoScalingPolicyIn' not in os.environ:
 					autoscaling_policy_arn(context)
 				AUTOSCALINGPOLICYOUT_ARN = os.environ['AutoScalingPolicyOut']
 				AUTOSCALINGPOLICYIN_ARN = os.environ['AutoScalingPolicyIn']
