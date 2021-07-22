@@ -69,7 +69,7 @@ def update_alarm_out(shards, stream):
 
 #fuction to update scale in alarm threshol
 def update_alarm_in(shards, stream):
-	new_threshold = (1000 * shards * 60)*80/100 #assuming alarm will fire at 80% of incoming records
+	new_threshold = (1000 * (shards-1) * 60)*80/100 #assuming alarm will fire at 80% of incoming records
 	try:
 		set_alarm = client_cloudwatch.put_metric_alarm(
 			AlarmName=CLOUDWATCHALARMNAMEIN,
